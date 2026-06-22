@@ -7,6 +7,7 @@ on:
 permissions:
   pull-requests: write
   contents: write
+  issues: write
 
 jobs:
   validate:
@@ -16,63 +17,92 @@ jobs:
       - name: Checkout Repository
         uses: actions/checkout@v4
 
-      - name: Validate PR Title
-        env:
-          PR_TITLE: ${{ github.event.pull_request.title }}
+      - name: Validate PR
+        id: validation
         run: |
-          echo "Checking PR Title..."
+          VALID=true
 
-          if [[ ! "$PR_TITLE" =~ ^(feature|fix|docs): ]]; then
-            echo "Invalid PR title."
-            echo "Expected:"
-            echo "feature: Dio API Client"
-            echo "fix: SVG Utility"
-            exit 1
+          # --------------------
+          # PR Title Validation
+          # --------------------
+          TITLE="${{ github.event.pull_request.title }}"
+
+          if [[ ! "$TITLE" =~ ^(feature|fix|docs): ]]; then
+            echo "Invalid title"
+            VALID=false
           fi
 
-      - name: Validate PR Description
-        env:
-          PR_BODY: ${{ github.event.pull_request.body }}
-        run: |
-          echo "Checking PR Description..."
+          # --------------------
+          # PR Description Validation
+          # --------------------
+          BODY="${{ github.event.pull_request.body }}"
 
-          echo "$PR_BODY" | grep -q "Feature Name:" || exit 1
-          echo "$PR_BODY" | grep -q "Folder Name:" || exit 1
-          echo "$PR_BODY" | grep -q "Purpose:" || exit 1
-          echo "$PR_BODY" | grep -q "Dependencies:" || exit 1
-          echo "$PR_BODY" | grep -q "Usage:" || exit 1
+          echo "$BODY" | grep -q "Feature Name:" || VALID=false
+          echo "$BODY" | grep -q "Folder Name:" || VALID=false
+          echo "$BODY" | grep -q "Purpose:" || VALID=false
+          echo "$BODY" | grep -q "Dependencies:" || VALID=false
+          echo "$BODY" | grep -q "Usage:" || VALID=false
 
-      - name: Check Folder Structure
-        run: |
-          echo "Checking Folder Structure..."
-
+          # --------------------
+          # Folder Structure Validation
+          # --------------------
           git fetch origin main
 
           CHANGED_FILES=$(git diff --name-only origin/main)
 
-          echo "$CHANGED_FILES"
-
           INVALID=$(echo "$CHANGED_FILES" | grep -vE '^(api|utils|services|widgets|README.md)')
 
           if [ ! -z "$INVALID" ]; then
-            echo "Invalid files detected:"
-            echo "$INVALID"
-            exit 1
+            echo "Invalid files found"
+            VALID=false
           fi
 
-      - name: Verify Documentation Exists
+          echo "valid=$VALID" >> $GITHUB_OUTPUT
+
+      - name: Close Invalid PR
+        if: steps.validation.outputs.valid == 'false'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          if [ ! -f README.md ]; then
-            echo "README.md missing"
-            exit 1
-          fi
+          PR_NUMBER=${{ github.event.pull_request.number }}
 
-      - name: Auto Merge PR
-        if: success()
+          # Add Label
+          gh pr edit $PR_NUMBER --add-label "invalid-structure"
+
+          # Comment
+          gh pr comment $PR_NUMBER --body "
+          ❌ Pull Request rejected.
+
+          Reason:
+          - PR title format is invalid OR
+          - Required PR template fields are missing OR
+          - Folder structure does not follow repository standards.
+
+          Required format:
+
+          Title:
+          feature: Dio Client
+
+          Allowed folders:
+          - api
+          - utils
+          - services
+          - widgets
+
+          Please fix the issues and create a new PR.
+          "
+
+          # Close PR
+          gh pr close $PR_NUMBER
+
+          exit 1
+
+      - name: Auto Merge Valid PR
+        if: steps.validation.outputs.valid == 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           gh pr merge \
-          ${{ github.event.pull_request.number }} \
-          --squash \
-          --auto
+            ${{ github.event.pull_request.number }} \
+            --squash \
+            --auto
